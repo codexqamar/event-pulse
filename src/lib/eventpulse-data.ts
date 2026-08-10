@@ -122,7 +122,7 @@ export interface ProfileRow {
   health: string;
 }
 
-export const PROFILES: ProfileRow[] = [
+const PROFILE_ROWS: Array<[string, string, string, string, string]> = [
   ["Profile 01", "London Residential", "100% Persisted", "Authenticated", "Clean / No Leaks"],
   ["Profile 02", "London Residential", "100% Persisted", "Authenticated", "Clean / No Leaks"],
   ["Profile 03", "Manchester Mobile 5G", "98% Persisted", "Authenticated", "Clean / No Leaks"],
