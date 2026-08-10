@@ -133,13 +133,17 @@ const PROFILE_ROWS: Array<[string, string, string, string, string]> = [
   ["Profile 08", "Leeds Datacenter", "100% Persisted", "Authenticated", "Clean / No Leaks"],
   ["Profile 09", "Bristol Residential", "100% Persisted", "Re-auth Queued", "Clean / No Leaks"],
   ["Profile 10", "Dublin Mobile LTE", "100% Persisted", "Authenticated", "Clean / No Leaks"],
-].map(([name, region, cookies, session, health]) => ({
-  name,
-  region,
-  cookies,
-  session,
-  health,
-}));
+];
+
+export const PROFILES: ProfileRow[] = PROFILE_ROWS.map(
+  ([name, region, cookies, session, health]) => ({
+    name,
+    region,
+    cookies,
+    session,
+    health,
+  }),
+);
 
 export const ALERT_LOG = [
   {
