@@ -1,24 +1,71 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { Header } from "@/components/eventpulse/Header";
+import { SideRail, BottomNav, type NavId } from "@/components/eventpulse/Nav";
+import { SummaryBar } from "@/components/eventpulse/SummaryBar";
+import { MonitorGrid } from "@/components/eventpulse/MonitorGrid";
+import { ProfilePanel } from "@/components/eventpulse/ProfilePanel";
+import { AlertLog } from "@/components/eventpulse/AlertLog";
+import { SettingsPanel } from "@/components/eventpulse/SettingsPanel";
 
-// No head() here: the home route inherits title/description/og/twitter from
-// __root.tsx, and ships no og:image so serve-time hosting can inject the
-// project's social preview (explicit og:image or latest screenshot).
 export const Route = createFileRoute("/")({
-  component: Index,
+  head: () => ({
+    meta: [
+      { title: "EventPulse | Multi-Site Ticket Monitor Dashboard" },
+      {
+        name: "description",
+        content:
+          "Real-time ticketing analytics across Ticketmaster, AXS and SeeTickets with MultiLogin proxy profile management.",
+      },
+      { property: "og:title", content: "EventPulse | Multi-Site Ticket Monitor" },
+      {
+        property: "og:description",
+        content:
+          "Monitor worldwide ticket drops, proxy profiles and fingerprint health from one dark-mode command center.",
+      },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
+    ],
+  }),
+  component: Dashboard,
 });
 
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
-function Index() {
+function Dashboard() {
+  const [tab, setTab] = useState<NavId>("monitors");
+
   return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
+    <div className="flex min-h-screen bg-background text-foreground">
+      <SideRail active={tab} onSelect={setTab} />
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <Header />
+
+        <main className="flex-1 space-y-5 px-4 pb-24 pt-4 lg:px-6 lg:pb-8">
+          <SummaryBar />
+
+          {/* Mobile: one section at a time via bottom nav */}
+          <div className="space-y-5 lg:hidden">
+            {tab === "monitors" && <MonitorGrid />}
+            {tab === "profiles" && <ProfilePanel />}
+            {tab === "alerts" && <AlertLog className="max-h-[70vh]" />}
+            {tab === "settings" && <SettingsPanel />}
+          </div>
+
+          {/* Desktop: full command center */}
+          <div className="hidden gap-5 lg:grid lg:grid-cols-[minmax(0,1fr)_340px]">
+            <div className="space-y-5">
+              <MonitorGrid />
+              <ProfilePanel />
+            </div>
+            <aside className="space-y-5">
+              <AlertLog className="max-h-[420px]" />
+              <SettingsPanel />
+            </aside>
+          </div>
+        </main>
+      </div>
+
+      <BottomNav active={tab} onSelect={setTab} />
     </div>
   );
 }
