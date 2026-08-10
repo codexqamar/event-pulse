@@ -1,0 +1,16 @@
+{
+  "name": "EventPulse Dashboard",
+  "short_name": "EventPulse",
+  "description": "Multi-platform event ticketing analytics and proxy/profile monitoring.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0F172A",
+  "theme_color": "#0F172A",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "48x48",
+      "type": "image/x-icon"
+    }
+  ]
+}
