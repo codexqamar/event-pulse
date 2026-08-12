@@ -17,7 +17,7 @@ export function AlertLog({ className }: { className?: string }) {
         </h2>
         <span className="shrink-0 font-mono text-[11px] text-muted-foreground">live</span>
       </div>
-      <ul className="mt-3 space-y-2 overflow-y-auto pr-1">
+      <ul className="scrollbar-hidden mt-3 space-y-2 overflow-y-auto">
         {ALERT_LOG.map((log) => (
           <li
             key={log.time}

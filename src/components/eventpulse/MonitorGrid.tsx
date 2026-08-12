@@ -19,7 +19,7 @@ export function MonitorGrid() {
         </span>
       </div>
 
-      <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 lg:mx-0 lg:flex-wrap lg:px-0">
+      <div className="scrollbar-hidden -mx-4 flex gap-2 overflow-x-auto px-4 pb-1 lg:mx-0 lg:flex-wrap lg:px-0">
         {PLATFORM_FILTERS.map((f) => (
           <button
             key={f}
