@@ -17,7 +17,7 @@ export function ProfilePanel() {
         </span>
       </div>
 
-      <div className="mt-3 -mx-4 overflow-x-auto px-4">
+      <div className="scrollbar-hidden mt-3 -mx-4 overflow-x-auto px-4">
         <table className="w-full min-w-[720px] border-collapse text-left text-xs">
           <thead>
             <tr className="text-[10px] uppercase tracking-wider text-muted-foreground">

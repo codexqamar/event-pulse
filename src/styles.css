@@ -160,6 +160,19 @@
 }
 
 @layer base {
+  html,
+  body,
+  * {
+    scrollbar-width: none;
+  }
+
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar,
+  *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+
   * {
     border-color: var(--color-border);
   }
@@ -167,5 +180,14 @@
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+  }
+}
+
+@utility scrollbar-hidden {
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    width: 0;
+    height: 0;
   }
 }
