@@ -1,5 +1,22 @@
 const CACHE_NAME = "eventpulse-shell-v1";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/favicon.ico", "/icon.svg"];
+const ALERT_VIBRATION_PATTERN = [200, 80, 200, 80, 350];
+
+function buildAlertOptions({ body, tag, url }) {
+  return {
+    body,
+    icon: "/icon.svg",
+    badge: "/favicon.ico",
+    tag,
+    renotify: true,
+    requireInteraction: true,
+    silent: false,
+    timestamp: Date.now(),
+    vibrate: ALERT_VIBRATION_PATTERN,
+    actions: [{ action: "open", title: "Open EventPulse" }],
+    data: { url: url || "/" },
+  };
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -52,13 +69,14 @@ self.addEventListener("push", (event) => {
   }
 
   event.waitUntil(
-    self.registration.showNotification(payload.title, {
-      body: payload.body,
-      icon: "/favicon.ico",
-      badge: "/favicon.ico",
-      tag: "eventpulse-alert",
-      data: { url: payload.url || "/" },
-    }),
+    self.registration.showNotification(
+      payload.title,
+      buildAlertOptions({
+        body: payload.body,
+        tag: "eventpulse-alert",
+        url: payload.url,
+      }),
+    ),
   );
 });
 
@@ -66,13 +84,14 @@ self.addEventListener("message", (event) => {
   if (event.data?.type !== "EVENTPULSE_TEST_NOTIFICATION") return;
 
   event.waitUntil(
-    self.registration.showNotification("EventPulse test alert", {
-      body: "Push notification path is ready for backend wiring.",
-      icon: "/favicon.ico",
-      badge: "/favicon.ico",
-      tag: "eventpulse-test",
-      data: { url: "/" },
-    }),
+    self.registration.showNotification(
+      "EventPulse test alert",
+      buildAlertOptions({
+        body: "Push notification path is ready for backend wiring.",
+        tag: `eventpulse-test-${Date.now()}`,
+        url: "/",
+      }),
+    ),
   );
 });
 
