@@ -1,5 +1,5 @@
-import { ALERT_LOG } from "@/lib/eventpulse-data";
 import { cn } from "@/lib/utils";
+import type { BackendAlertLog } from "@/lib/eventpulse/types";
 
 const TONE: Record<string, string> = {
   online: "bg-online",
@@ -8,7 +8,13 @@ const TONE: Record<string, string> = {
   alert: "bg-alert",
 };
 
-export function AlertLog({ className }: { className?: string }) {
+export function AlertLog({
+  alerts,
+  className,
+}: {
+  alerts: BackendAlertLog[];
+  className?: string;
+}) {
   return (
     <section className={cn("panel flex flex-col p-4", className)}>
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
@@ -18,9 +24,14 @@ export function AlertLog({ className }: { className?: string }) {
         <span className="shrink-0 font-mono text-[11px] text-muted-foreground">live</span>
       </div>
       <ul className="scrollbar-hidden mt-3 space-y-2 overflow-y-auto">
-        {ALERT_LOG.map((log) => (
+        {alerts.length === 0 && (
+          <li className="rounded-md bg-secondary/50 px-3 py-2 text-xs text-muted-foreground">
+            No production alerts yet.
+          </li>
+        )}
+        {alerts.map((log) => (
           <li
-            key={log.time}
+            key={log.id}
             className="flex gap-2.5 rounded-md bg-secondary/50 px-3 py-2 text-xs"
           >
             <span

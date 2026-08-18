@@ -15,6 +15,16 @@ dist-ssr
 .tanstack/**
 .nitro
 *.local
+.env
+.env.*
+!.env.example
+
+# Local handoff / planning docs
+BACKEND_STATUS.md
+CLIENT_REQUIREMENTS.md
+
+# Local Supabase migration drafts handled outside Git for this handoff
+supabase/migrations/
 
 # Wrangler / Cloudflare
 .wrangler/
