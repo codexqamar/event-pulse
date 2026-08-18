@@ -1,47 +1,48 @@
 import { Activity, BellRing, Globe2, Timer } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import type { DashboardStats } from "@/lib/eventpulse/types";
 
-const CARDS: Array<{
+const CARD_META: Array<{
+  key: keyof DashboardStats;
   label: string;
-  value: string;
-  sub: string;
+  sub: (stats: DashboardStats) => string;
   icon: LucideIcon;
   tone: string;
 }> = [
   {
+    key: "activeMonitors",
     label: "Active Monitors",
-    value: "18",
-    sub: "Live Streams • +2 Today",
+    sub: () => "Live Streams",
     icon: Activity,
     tone: "text-online",
   },
   {
+    key: "alertsToday",
     label: "Ticket Alerts Detected",
-    value: "142",
-    sub: "Drops Today",
+    sub: () => "Drops Today",
     icon: BellRing,
     tone: "text-warn",
   },
   {
+    key: "connectedProfiles",
     label: "Connected Proxy Profiles",
-    value: "10 / 10",
-    sub: "Isolated IPs Active",
+    sub: (stats) => `${stats.connectedProfiles} Isolated IPs Active`,
     icon: Globe2,
     tone: "text-info",
   },
   {
+    key: "avgResponseMs",
     label: "Avg Response Time",
-    value: "142ms",
-    sub: "Across all targets",
+    sub: () => "Across all targets",
     icon: Timer,
     tone: "text-alert",
   },
 ];
 
-export function SummaryBar() {
+export function SummaryBar({ stats }: { stats: DashboardStats }) {
   return (
     <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-      {CARDS.map((card) => (
+      {CARD_META.map((card) => (
         <div key={card.label} className="panel p-3 sm:p-4">
           <div className="flex items-start justify-between gap-2">
             <p className="min-w-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -50,9 +51,9 @@ export function SummaryBar() {
             <card.icon className={`h-4 w-4 shrink-0 ${card.tone}`} />
           </div>
           <p className="mt-2 font-display text-2xl font-bold tabular-nums sm:text-3xl">
-            {card.value}
+            {card.key === "avgResponseMs" ? `${stats[card.key]}ms` : stats[card.key]}
           </p>
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">{card.sub}</p>
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">{card.sub(stats)}</p>
         </div>
       ))}
     </section>

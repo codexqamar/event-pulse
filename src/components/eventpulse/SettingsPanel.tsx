@@ -1,29 +1,72 @@
 import { useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { useRouter } from "@tanstack/react-router";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { BellRing, Send } from "lucide-react";
 import { showTestNotification, setupPushNotifications } from "@/lib/pwa";
+import type { BackendSettings } from "@/lib/eventpulse/types";
+import { savePushSubscriptionFn, saveSettingsFn } from "@/lib/eventpulse/server-fns";
 
-export function SettingsPanel() {
-  const [interval, setInterval] = useState([4]);
-  const [sound, setSound] = useState(true);
-  const [push, setPush] = useState(true);
+export function SettingsPanel({ settings }: { settings: BackendSettings }) {
+  const [interval, setInterval] = useState([settings.refreshSeconds]);
+  const [sound, setSound] = useState(settings.soundAlerts);
+  const [push, setPush] = useState(settings.pushAlerts);
+  const [sms, setSms] = useState(settings.smsAlerts);
+  const [whatsapp, setWhatsapp] = useState(settings.whatsappAlerts);
+  const [multiloginEndpoint, setMultiloginEndpoint] = useState(settings.multiloginEndpoint);
   const [pushStatus, setPushStatus] = useState("Service worker registers automatically.");
   const [isPushBusy, setIsPushBusy] = useState(false);
+  const [settingsStatus, setSettingsStatus] = useState("");
+  const saveSettings = useServerFn(saveSettingsFn);
+  const savePushSubscription = useServerFn(savePushSubscriptionFn);
+  const router = useRouter();
 
   async function runPushAction(action: "setup" | "test") {
     setIsPushBusy(true);
     try {
       const result =
         action === "setup" ? await setupPushNotifications() : await showTestNotification();
+      if (result.status === "ready" && result.subscription) {
+        await savePushSubscription({
+          data: {
+            endpoint: result.subscription.endpoint,
+            subscription: result.subscription.toJSON() as Record<string, unknown>,
+            userAgent: navigator.userAgent,
+          },
+        });
+      }
       setPushStatus(result.message);
       setPush(result.status === "ready");
     } catch (error) {
       setPushStatus(error instanceof Error ? error.message : "Push setup failed.");
     } finally {
       setIsPushBusy(false);
+    }
+  }
+
+  async function persistSettings() {
+    setSettingsStatus("");
+    try {
+      await saveSettings({
+        data: {
+          refreshSeconds: interval[0] ?? 4,
+          soundAlerts: sound,
+          pushAlerts: push,
+          smsAlerts: sms,
+          whatsappAlerts: whatsapp,
+          autoRotateProxyOnRateLimit: settings.autoRotateProxyOnRateLimit,
+          maintainStickyMobileIp: settings.maintainStickyMobileIp,
+          multiloginEndpoint,
+          multiloginStatePolicy: "save_profile_state_on_user_action",
+        },
+      });
+      setSettingsStatus("Settings saved to Supabase.");
+      await router.invalidate();
+    } catch (error) {
+      setSettingsStatus(error instanceof Error ? error.message : "Settings save failed.");
     }
   }
 
@@ -61,6 +104,14 @@ export function SettingsPanel() {
           Desktop / Mobile Push
           <Switch checked={push} onCheckedChange={setPush} />
         </label>
+        <label className="flex items-center justify-between gap-3 rounded-md bg-secondary/60 px-3 py-2.5 text-xs">
+          SMS Alerts
+          <Switch checked={sms} onCheckedChange={setSms} />
+        </label>
+        <label className="flex items-center justify-between gap-3 rounded-md bg-secondary/60 px-3 py-2.5 text-xs">
+          WhatsApp Alerts
+          <Switch checked={whatsapp} onCheckedChange={setWhatsapp} />
+        </label>
       </div>
 
       <div className="space-y-2 rounded-md bg-secondary/60 px-3 py-3">
@@ -92,20 +143,25 @@ export function SettingsPanel() {
         <label htmlFor="ml-port" className="text-xs text-muted-foreground">
           MultiLogin Local REST Endpoint
         </label>
-        <Input id="ml-port" defaultValue="http://localhost:35462" className="font-mono text-xs" />
-      </div>
-
-      <div className="space-y-1.5">
-        <label htmlFor="ml-key" className="text-xs text-muted-foreground">
-          MultiLogin API Key
-        </label>
         <Input
-          id="ml-key"
-          type="password"
-          defaultValue="ml_live_8f31d0c4a7"
+          id="ml-port"
+          value={multiloginEndpoint}
+          onChange={(event) => setMultiloginEndpoint(event.target.value)}
           className="font-mono text-xs"
         />
       </div>
+
+      <div className="space-y-1.5">
+        <p className="text-xs text-muted-foreground">
+          MultiLogin session policy: save profile restore metadata in Supabase; cookie export needs
+          local MultiLogin bridge.
+        </p>
+      </div>
+
+      <Button className="w-full" onClick={() => void persistSettings()}>
+        Save Backend Settings
+      </Button>
+      {settingsStatus && <p className="text-xs text-muted-foreground">{settingsStatus}</p>}
     </section>
   );
 }

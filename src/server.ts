@@ -2,6 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { runMonitorPass } from "./lib/eventpulse/supabase.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -47,6 +48,11 @@ function isH3SwallowedErrorBody(body: string): boolean {
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
+      const url = new URL(request.url);
+      if (url.pathname === "/api/eventpulse/monitor-run") {
+        return await handleMonitorRun(request);
+      }
+
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);
@@ -59,3 +65,28 @@ export default {
     }
   },
 };
+
+async function handleMonitorRun(request: Request) {
+  if (request.method !== "POST") {
+    return Response.json({ error: "Method not allowed" }, { status: 405 });
+  }
+
+  const configuredSecret = process.env["EVENTPULSE_CRON_SECRET"];
+  const suppliedSecret =
+    request.headers.get("x-eventpulse-cron-secret") ??
+    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+
+  if (configuredSecret && suppliedSecret !== configuredSecret) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!configuredSecret && process.env["NODE_ENV"] === "production") {
+    return Response.json(
+      { error: "EVENTPULSE_CRON_SECRET is required in production." },
+      { status: 500 },
+    );
+  }
+
+  const result = await runMonitorPass();
+  return Response.json(result);
+}
