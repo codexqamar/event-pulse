@@ -29,7 +29,7 @@ export function MonitorGrid({
     event: "",
     venue: "",
     url: "",
-    refresh: 4,
+    refresh: 10,
     profile: profiles[0]?.name ?? "",
     proxy: profiles[0]?.stickyIp ?? "",
     sectionFilters: "Arena A, Arena F",
@@ -181,13 +181,13 @@ export function MonitorGrid({
             <Input
               value={form.profile}
               onChange={(event) => setForm((value) => ({ ...value, profile: event.target.value }))}
-              placeholder="Profile name"
+              placeholder="Profile name (optional)"
               className="text-xs"
             />
             <Input
               value={form.proxy}
               onChange={(event) => setForm((value) => ({ ...value, proxy: event.target.value }))}
-              placeholder="Proxy / sticky IP label"
+              placeholder="Proxy / sticky IP label (optional)"
               className="text-xs"
             />
             <label className="flex items-center justify-between gap-3 rounded-md bg-secondary/60 px-3 py-2.5 text-xs">

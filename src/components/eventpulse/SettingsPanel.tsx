@@ -52,7 +52,7 @@ export function SettingsPanel({ settings }: { settings: BackendSettings }) {
     try {
       await saveSettings({
         data: {
-          refreshSeconds: interval[0] ?? 4,
+          refreshSeconds: interval[0] ?? 10,
           soundAlerts: sound,
           pushAlerts: push,
           smsAlerts: sms,
