@@ -1,7 +1,7 @@
 import type { DashboardData } from "./types";
 
 export const DEFAULT_SETTINGS = {
-  refreshSeconds: 4,
+  refreshSeconds: 10,
   soundAlerts: true,
   pushAlerts: true,
   smsAlerts: false,
