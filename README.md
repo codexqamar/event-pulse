@@ -119,6 +119,13 @@ container. Every completed due check creates a full snapshot alert and sends it 
 enabled and configured delivery channel. Run only one scheduler-enabled replica to prevent
 duplicate alerts; additional web replicas must set `EVENTPULSE_SCHEDULER_ENABLED=false`.
 
+Telegram and Discord receive every alert that web push receives. Each Telegram chat and Discord
+webhook has its own in-process queue that stays under the provider rate limits (Telegram groups:
+20 messages/minute, Discord webhooks: about 30 messages/minute), waits for `retry_after` on HTTP 429,
+and combines alerts that arrive while it waits into one message instead of dropping them. Use
+**Test All Channels** in Global Controls & Settings to send one test alert through every enabled
+channel and see per-channel results.
+
 `/api/eventpulse/health` reports token state without exposing the credential. Finite tokens trigger
 one warning per 24 hours through enabled notification channels after entering the configured warning
 window. Multilogin may include a provider-managed technical JWT expiry even when `no_exp` is

@@ -23,6 +23,7 @@ import {
   isApprovedMultiloginProfile,
   readRenderedTicketPage,
 } from "./multilogin-browser.server";
+import { ChannelQueue, parseRetryAfterMs, type ChannelSendResult } from "./channel-queue.server";
 
 const SUPABASE_URL =
   process.env["SUPABASE_URL"] ??
@@ -458,6 +459,30 @@ export async function savePushSubscription(input: SavePushSubscriptionInput) {
   return { ok: true };
 }
 
+// Sends one test alert through every enabled channel using the same path as monitor alerts.
+export async function sendTestAlert() {
+  if (!isConfigured()) throw new Error("Supabase is not configured.");
+
+  const [settingsRows, subscriptions] = await Promise.all([
+    rest<SettingsRow[]>("eventpulse_settings", { query: { select: "*", limit: "1" } }),
+    rest<PushSubscriptionRow[]>("eventpulse_push_subscriptions", {
+      query: { select: "endpoint,subscription" },
+    }),
+  ]);
+  const settings = settingsRows[0] ? mapSettings(settingsRows[0]) : DEFAULT_SETTINGS;
+  if (!hasEnabledDeliveryChannel(settings)) {
+    throw new Error("No alert channel is enabled. Enable a channel and save settings first.");
+  }
+
+  return await deliverAlert({
+    title: "HD-1 Drop Monitor test alert",
+    body: `Sent:${new Date().toISOString()}\nAll enabled alert channels are receiving monitor alerts.`,
+    url: process.env["EVENTPULSE_PUBLIC_URL"] ?? "",
+    settings,
+    subscriptions,
+  });
+}
+
 export async function runMonitorPass(): Promise<MonitorRunResult> {
   if (!isConfigured()) {
     return {
@@ -512,72 +537,167 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
     result.errors.push(`MultiLogin token warning failed: ${formatUnknownError(error)}`);
   }
 
-  for (const row of dueTargets) {
-    result.checked += 1;
-    const target = mapTarget(row, settings.refreshSeconds);
-    const check = await checkTarget(target, settings, profilesByName.get(target.profile));
-    const now = new Date().toISOString();
-    await rest("eventpulse_targets", {
-      method: "PATCH",
-      query: { id: `eq.${row.id}` },
-      body: {
-        status: check.status,
-        availability: check.availability,
-        last_checked_at: now,
-        last_response_ms: check.responseMs,
-        last_status_code: check.statusCode,
-        last_error: check.error,
-        last_available_at: check.status === "available" ? now : row.last_available_at,
-      },
-    });
+  const deliveries: Promise<DeliveryResult>[] = [];
+  try {
+    for (const row of dueTargets) {
+      result.checked += 1;
+      const target = mapTarget(row, settings.refreshSeconds);
+      const check = await checkTarget(target, settings, profilesByName.get(target.profile));
+      const now = new Date().toISOString();
+      await rest("eventpulse_targets", {
+        method: "PATCH",
+        query: { id: `eq.${row.id}` },
+        body: {
+          status: check.status,
+          availability: check.availability,
+          last_checked_at: now,
+          last_response_ms: check.responseMs,
+          last_status_code: check.statusCode,
+          last_error: check.error,
+          last_available_at: check.status === "available" ? now : row.last_available_at,
+        },
+      });
 
-    const firstObservation = !row.last_checked_at;
-    const snapshotChanged = check.availability !== row.availability || check.status !== row.status;
-    if (!hasEnabledDeliveryChannel(settings)) continue;
+      const firstObservation = !row.last_checked_at;
+      const snapshotChanged =
+        check.availability !== row.availability || check.status !== row.status;
+      if (!hasEnabledDeliveryChannel(settings)) continue;
 
-    const alertMessage =
-      firstObservation || snapshotChanged
-        ? buildTicketAlertMessage(
-            target.event,
-            row.availability,
-            check.availability,
-            firstObservation,
-          )
-        : buildScheduledTicketSnapshotMessage(target.event, check.availability, now);
-    const [alert] = await rest<AlertRow[]>("eventpulse_alerts", {
-      method: "POST",
-      prefer: "return=representation",
-      body: {
-        target_id: row.id,
-        tone:
-          check.status === "available"
-            ? "online"
-            : check.status === "captcha" || check.status === "limited"
-              ? "warn"
-              : "info",
-        message: alertMessage,
-        deep_link: target.deepLink,
-      },
-    });
-    result.alertsCreated += 1;
+      const alertMessage =
+        firstObservation || snapshotChanged
+          ? buildTicketAlertMessage(
+              target.event,
+              row.availability,
+              check.availability,
+              firstObservation,
+            )
+          : buildScheduledTicketSnapshotMessage(target.event, check.availability, now);
+      const [alert] = await rest<AlertRow[]>("eventpulse_alerts", {
+        method: "POST",
+        prefer: "return=representation",
+        body: {
+          target_id: row.id,
+          tone:
+            check.status === "available"
+              ? "online"
+              : check.status === "captcha" || check.status === "limited"
+                ? "warn"
+                : "info",
+          message: alertMessage,
+          deep_link: target.deepLink,
+        },
+      });
+      result.alertsCreated += 1;
 
-    const delivery = await deliverAlert({
-      ...(alert?.id ? { alertId: alert.id } : {}),
-      title: "HD-1 Drop Monitor ticket alert",
-      body: alertMessage,
-      url: target.deepLink,
-      settings,
-      subscriptions,
-    });
-    result.pushSent += delivery.pushSent;
-    result.smsSent += delivery.smsSent;
-    result.whatsappSent += delivery.whatsappSent;
-    result.telegramSent += delivery.telegramSent;
-    result.discordSent += delivery.discordSent;
-    result.errors.push(...delivery.errors);
+      // Deliver in the background so a slow or rate-limited channel never delays the next check;
+      // every channel receives the same alert, and the pass waits for all of them before returning.
+      deliveries.push(
+        deliverAlert({
+          ...(alert?.id ? { alertId: alert.id } : {}),
+          title: ticketAlertTitle(check.status),
+          body: alertMessage,
+          url: target.deepLink,
+          settings,
+          subscriptions,
+        }),
+      );
+    }
+  } finally {
+    // Settle deliveries even if a target update throws, so none end as unhandled rejections.
+    for (const outcome of await Promise.allSettled(deliveries)) {
+      if (outcome.status === "rejected") {
+        result.errors.push(`Alert delivery failed: ${formatUnknownError(outcome.reason)}`);
+        continue;
+      }
+      addDeliveryResult(result, outcome.value);
+    }
   }
 
   return result;
+}
+
+const MONITOR_FAILURE_REPEAT_MS = 15 * 60 * 1000;
+// Set while the scheduler is failing: when it started and when the last failure alert went out.
+let monitorOutage: { since: string; alertedAt: number } | null = null;
+
+// A crashed monitor pass means no ticket alerts at all, so tell every reachable channel, at most
+// once per 15 minutes while it keeps failing (scheduler ticks are every second).
+export async function notifyMonitorFailure(error: unknown) {
+  const now = Date.now();
+  if (monitorOutage && now - monitorOutage.alertedAt < MONITOR_FAILURE_REPEAT_MS) return;
+  monitorOutage = { since: monitorOutage?.since ?? new Date(now).toISOString(), alertedAt: now };
+
+  const message = formatUnknownError(error).replace(/\s+/g, " ").slice(0, 500);
+  await deliverOperationalAlert(
+    "🔴 HD-1: monitor pass failed",
+    [
+      "Ticket checks are failing; no ticket alerts are being produced until this clears.",
+      `Error: ${message}`,
+      `Failing since: ${monitorOutage.since}`,
+    ].join("\n"),
+  );
+}
+
+// Called after every successful pass; sends one all-clear if a failure alert went out.
+export async function notifyMonitorRecovered() {
+  if (!monitorOutage) return;
+  const { since } = monitorOutage;
+  monitorOutage = null;
+  await deliverOperationalAlert(
+    "✅ HD-1: monitor recovered",
+    `Ticket checks are running again.\nFailing since: ${since}\nRecovered: ${new Date().toISOString()}`,
+  );
+}
+
+// Settings come from Supabase when it answers; if Supabase itself is the failure, fall back to the
+// chat channels configured in the environment.
+async function deliverOperationalAlert(title: string, body: string) {
+  let settings: BackendSettings;
+  let subscriptions: PushSubscriptionRow[] = [];
+  try {
+    const [settingsRows, subscriptionRows] = await Promise.all([
+      rest<SettingsRow[]>("eventpulse_settings", { query: { select: "*", limit: "1" } }),
+      rest<PushSubscriptionRow[]>("eventpulse_push_subscriptions", {
+        query: { select: "endpoint,subscription" },
+      }),
+    ]);
+    settings = settingsRows[0] ? mapSettings(settingsRows[0]) : DEFAULT_SETTINGS;
+    subscriptions = subscriptionRows;
+  } catch {
+    settings = {
+      ...DEFAULT_SETTINGS,
+      pushAlerts: false,
+      telegramAlerts: Boolean(process.env["TELEGRAM_BOT_TOKEN"]),
+      discordAlerts: Boolean(process.env["DISCORD_WEBHOOK_URLS"]),
+    };
+  }
+  if (!hasEnabledDeliveryChannel(settings)) return;
+
+  const delivery = await deliverAlert({
+    title,
+    body,
+    url: process.env["EVENTPULSE_PUBLIC_URL"] ?? "",
+    settings,
+    subscriptions,
+  });
+  if (delivery.errors.length) console.error("HD-1 operational alert issues", delivery.errors);
+}
+
+// Same title on every channel, so a ticket drop stands out from routine snapshot alerts.
+function ticketAlertTitle(status: BackendMonitorTarget["status"]) {
+  if (status === "available") return "🟢 HD-1: TICKETS AVAILABLE";
+  if (status === "captcha") return "⚠️ HD-1: captcha challenge";
+  if (status === "limited") return "⚠️ HD-1: rate limited or check failed";
+  return "HD-1 Drop Monitor ticket alert";
+}
+
+function addDeliveryResult(result: MonitorRunResult, delivery: DeliveryResult) {
+  result.pushSent += delivery.pushSent;
+  result.smsSent += delivery.smsSent;
+  result.whatsappSent += delivery.whatsappSent;
+  result.telegramSent += delivery.telegramSent;
+  result.discordSent += delivery.discordSent;
+  result.errors.push(...delivery.errors);
 }
 
 function mapTarget(
@@ -820,12 +940,7 @@ async function notifyMultiloginTokenExpiry(
     settings,
     subscriptions,
   });
-  result.pushSent += delivery.pushSent;
-  result.smsSent += delivery.smsSent;
-  result.whatsappSent += delivery.whatsappSent;
-  result.telegramSent += delivery.telegramSent;
-  result.discordSent += delivery.discordSent;
-  result.errors.push(...delivery.errors);
+  addDeliveryResult(result, delivery);
   lastTokenWarning = { key: warningKey, sentAt: Date.now() };
 }
 
@@ -888,6 +1003,8 @@ async function checkTarget(
   }
 }
 
+type DeliveryResult = Omit<MonitorRunResult, "checked" | "alertsCreated">;
+
 async function deliverAlert(input: {
   alertId?: string;
   title: string;
@@ -895,7 +1012,7 @@ async function deliverAlert(input: {
   url: string;
   settings: BackendSettings;
   subscriptions: PushSubscriptionRow[];
-}) {
+}): Promise<DeliveryResult> {
   const result = {
     pushSent: 0,
     smsSent: 0,
@@ -905,6 +1022,8 @@ async function deliverAlert(input: {
     errors: [] as string[],
   };
 
+  // Push shows the title separately; text channels get it as the first line of the message.
+  const text = `${input.title}\n${input.body}`;
   [result.pushSent, result.smsSent, result.whatsappSent, result.telegramSent, result.discordSent] =
     await Promise.all([
       input.settings.pushAlerts && input.subscriptions.length > 0
@@ -914,22 +1033,22 @@ async function deliverAlert(input: {
         : 0,
       input.settings.smsAlerts
         ? deliverChannel("Twilio SMS", result.errors, () =>
-            sendTwilioMessage("sms", input.body, result.errors),
+            sendTwilioMessage("sms", text, result.errors),
           )
         : 0,
       input.settings.whatsappAlerts
         ? deliverChannel("Twilio WhatsApp", result.errors, () =>
-            sendTwilioMessage("whatsapp", input.body, result.errors),
+            sendTwilioMessage("whatsapp", text, result.errors),
           )
         : 0,
       input.settings.telegramAlerts
         ? deliverChannel("Telegram", result.errors, () =>
-            sendTelegramMessage(input.body, input.url, result.errors),
+            sendTelegramMessage(text, input.url, result.errors),
           )
         : 0,
       input.settings.discordAlerts
         ? deliverChannel("Discord", result.errors, () =>
-            sendDiscordMessage(input.body, input.url, result.errors),
+            sendDiscordMessage(text, input.url, result.errors),
           )
         : 0,
     ]);
@@ -1029,6 +1148,9 @@ function parseRecipients(value: string | undefined) {
     .filter(Boolean);
 }
 
+const telegramQueues = new Map<string, ChannelQueue>();
+const discordQueues = new Map<string, ChannelQueue>();
+
 async function sendTelegramMessage(body: string, url: string, errors: string[]) {
   const token = process.env["TELEGRAM_BOT_TOKEN"];
   const chatIds = parseRecipients(process.env["TELEGRAM_CHAT_IDS"]);
@@ -1037,25 +1159,35 @@ async function sendTelegramMessage(body: string, url: string, errors: string[]) 
     return 0;
   }
 
-  let sent = 0;
-  for (const chatId of chatIds) {
-    const response = await fetchDelivery(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: `${body}\n${url}`,
-        disable_web_page_preview: true,
-      }),
-    });
+  const text = url ? `${body}\n${url}` : body;
+  const results = await Promise.all(
+    chatIds.map((chatId) => telegramQueue(token, chatId).enqueue(text, errors)),
+  );
+  return results.filter(Boolean).length;
+}
 
-    if (response.ok) {
-      sent += 1;
-    } else {
-      errors.push(`Telegram failed for ${chatId}: ${response.status}`);
-    }
+function telegramQueue(token: string, chatId: string) {
+  const key = `${token}:${chatId}`;
+  let queue = telegramQueues.get(key);
+  if (!queue) {
+    queue = new ChannelQueue({
+      label: `Telegram ${chatId}`,
+      // Telegram allows ~1 message/second per chat and 20 messages/minute per group or channel.
+      minIntervalMs: chatId.startsWith("-") ? 3_100 : 1_100,
+      maxLength: 4_096,
+      send: async (text) => {
+        const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+          signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+        });
+        return await toChannelResult(response);
+      },
+    });
+    telegramQueues.set(key, queue);
   }
-  return sent;
+  return queue;
 }
 
 async function sendDiscordMessage(body: string, url: string, errors: string[]) {
@@ -1065,24 +1197,59 @@ async function sendDiscordMessage(body: string, url: string, errors: string[]) {
     return 0;
   }
 
-  let sent = 0;
-  for (const webhookUrl of webhookUrls) {
-    const response = await fetchDelivery(webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        content: `**HD-1 Drop Monitor**\n${body}\n${url}`,
-        allowed_mentions: { parse: [] },
-      }),
-    });
+  const text = url ? `${body}\n${url}` : body;
+  const results = await Promise.all(
+    webhookUrls.map((webhookUrl) => discordQueue(webhookUrl).enqueue(text, errors)),
+  );
+  return results.filter(Boolean).length;
+}
 
-    if (response.ok || response.status === 204) {
-      sent += 1;
-    } else {
-      errors.push(`Discord failed: ${response.status}`);
-    }
+function discordQueue(webhookUrl: string) {
+  let queue = discordQueues.get(webhookUrl);
+  if (!queue) {
+    queue = new ChannelQueue({
+      label: `Discord webhook #${discordQueues.size + 1}`,
+      // Discord webhooks allow 5 requests / 2 seconds and roughly 30 messages/minute per channel.
+      minIntervalMs: 2_100,
+      maxLength: 2_000,
+      send: async (text) => {
+        const response = await fetch(webhookUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ content: text, allowed_mentions: { parse: [] } }),
+          signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+        });
+        return await toChannelResult(response);
+      },
+    });
+    discordQueues.set(webhookUrl, queue);
   }
-  return sent;
+  return queue;
+}
+
+async function toChannelResult(response: Response): Promise<ChannelSendResult> {
+  if (response.ok) return { ok: true, status: response.status, retryAfterMs: null, detail: "" };
+  const raw = await response.text().catch(() => "");
+  let body: unknown = null;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    // Non-JSON error bodies are reported as plain text below.
+  }
+  const description =
+    body && typeof body === "object"
+      ? ((body as { description?: unknown; message?: unknown }).description ??
+        (body as { message?: unknown }).message)
+      : null;
+  return {
+    ok: false,
+    status: response.status,
+    retryAfterMs: response.status === 429 ? parseRetryAfterMs(response, body) : null,
+    detail: (typeof description === "string" ? description : stripHtml(raw))
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 200),
+  };
 }
 
 async function fetchDelivery(url: string, init: RequestInit) {
