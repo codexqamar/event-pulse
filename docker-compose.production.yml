@@ -1,0 +1,39 @@
+services:
+  launcher:
+    image: public.ecr.aws/d3n0b1o9/mlx-launcher:mlx-latest
+    platform: linux/amd64
+    restart: unless-stopped
+    expose:
+      - "3000"
+      - "45001"
+      - "45003"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_VAPID_PUBLIC_KEY: ${VITE_VAPID_PUBLIC_KEY:?}
+    network_mode: service:launcher
+    depends_on:
+      - launcher
+    restart: unless-stopped
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL:?}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?}
+      EVENTPULSE_CRON_SECRET: ${EVENTPULSE_CRON_SECRET:?}
+      EVENTPULSE_PUBLIC_URL: ${EVENTPULSE_PUBLIC_URL:?}
+      EVENTPULSE_SCHEDULER_ENABLED: ${EVENTPULSE_SCHEDULER_ENABLED:-false}
+      EVENTPULSE_SCHEDULER_TICK_MS: ${EVENTPULSE_SCHEDULER_TICK_MS:-1000}
+      VITE_VAPID_PUBLIC_KEY: ${VITE_VAPID_PUBLIC_KEY:?}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:?}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:?}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
+      TELEGRAM_CHAT_IDS: ${TELEGRAM_CHAT_IDS:?}
+      DISCORD_WEBHOOK_URLS: ${DISCORD_WEBHOOK_URLS:?}
+      MULTILOGIN_API_TOKEN: ${MULTILOGIN_API_TOKEN:?}
+      MULTILOGIN_TOKEN_EXPIRY_WARNING_HOURS: ${MULTILOGIN_TOKEN_EXPIRY_WARNING_HOURS:-72}
+      MULTILOGIN_LAUNCHER_ENDPOINT: https://launcher.mlx.yt:45001
+      MULTILOGIN_CDP_HOST: 127.0.0.1
+      MULTILOGIN_HEADLESS: "true"
+      MULTILOGIN_PROXY_CREDENTIALS: ${MULTILOGIN_PROXY_CREDENTIALS:?}

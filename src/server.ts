@@ -2,6 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { getMultiloginTokenHealth } from "./lib/eventpulse/multilogin-browser.server";
 import { runMonitorPass } from "./lib/eventpulse/supabase.server";
 
 type ServerEntry = {
@@ -9,6 +10,7 @@ type ServerEntry = {
 };
 
 let serverEntryPromise: Promise<ServerEntry> | undefined;
+let scheduledMonitorRunning = false;
 
 async function getServerEntry(): Promise<ServerEntry> {
   if (!serverEntryPromise) {
@@ -18,6 +20,38 @@ async function getServerEntry(): Promise<ServerEntry> {
   }
   return serverEntryPromise;
 }
+
+function startMonitorScheduler() {
+  if (process.env["EVENTPULSE_SCHEDULER_ENABLED"] !== "true") return;
+
+  const configuredTick = Number(process.env["EVENTPULSE_SCHEDULER_TICK_MS"] ?? 1_000);
+  const tickMs = Number.isFinite(configuredTick)
+    ? Math.min(Math.max(configuredTick, 1_000), 60_000)
+    : 1_000;
+  const timer = setInterval(() => void runScheduledMonitorPass(), tickMs);
+  timer.unref?.();
+
+  const initialRun = setTimeout(() => void runScheduledMonitorPass(), 1_000);
+  initialRun.unref?.();
+  console.info(`HD-1 monitor scheduler enabled (${tickMs}ms tick).`);
+}
+
+async function runScheduledMonitorPass() {
+  if (scheduledMonitorRunning) return;
+  scheduledMonitorRunning = true;
+  try {
+    const result = await runMonitorPass();
+    if (result.checked > 0 || result.errors.length > 0) {
+      console.info("HD-1 monitor pass", result);
+    }
+  } catch (error) {
+    console.error("HD-1 scheduled monitor pass failed", error);
+  } finally {
+    scheduledMonitorRunning = false;
+  }
+}
+
+startMonitorScheduler();
 
 // h3 swallows in-handler throws into a normal 500 Response with body
 // {"unhandled":true,"message":"HTTPError"} — try/catch alone never fires for those.
@@ -49,6 +83,9 @@ export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
       const url = new URL(request.url);
+      if (url.pathname === "/api/eventpulse/health") {
+        return Response.json({ ok: true, multiloginToken: getMultiloginTokenHealth() });
+      }
       if (url.pathname === "/api/eventpulse/monitor-run") {
         return await handleMonitorRun(request);
       }

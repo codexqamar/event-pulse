@@ -18,6 +18,8 @@ dist-ssr
 .env
 .env.*
 !.env.example
+.tmp/
+artifacts/
 
 # Local handoff / planning docs
 BACKEND_STATUS.md
