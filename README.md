@@ -100,3 +100,37 @@ cd <repository-name>
 npm i
 npm run dev
 ```
+
+## Production monitor scheduler
+
+Persistent ticket checks run inside the Node/Docker server. Production must run exactly one
+scheduler-enabled instance with these environment values:
+
+```sh
+EVENTPULSE_SCHEDULER_ENABLED=true
+EVENTPULSE_SCHEDULER_TICK_MS=1000
+EVENTPULSE_PUBLIC_URL=https://your-production-domain.example
+MULTILOGIN_TOKEN_EXPIRY_WARNING_HOURS=72
+```
+
+The scheduler reloads Global Controls & Settings from Supabase on every pass. Increasing or
+decreasing Global Refresh Interval therefore changes the next due check without restarting the
+container. Every completed due check creates a full snapshot alert and sends it through each
+enabled and configured delivery channel. Run only one scheduler-enabled replica to prevent
+duplicate alerts; additional web replicas must set `EVENTPULSE_SCHEDULER_ENABLED=false`.
+
+`/api/eventpulse/health` reports token state without exposing the credential. Finite tokens trigger
+one warning per 24 hours through enabled notification channels after entering the configured warning
+window. Multilogin may include a provider-managed technical JWT expiry even when `no_exp` is
+requested, so deployment must follow the expiry reported by this health endpoint. Changing the
+master account password also invalidates active automation tokens.
+
+The token authenticates the Multilogin workspace; it does not run browser profiles by itself. A
+remote production host must also run a reachable Multilogin launcher, either through Multilogin's
+supported launcher container or a securely connected machine running the desktop launcher. Keep the
+application and launcher together on a private Docker network where possible.
+
+For a headless production launcher, configure `MULTILOGIN_LAUNCHER_ENDPOINT` with its private
+network URL, set `MULTILOGIN_CDP_HOST` to the launcher host, and set
+`MULTILOGIN_HEADLESS=true`. Local desktop development can leave the endpoint override empty and use
+`MULTILOGIN_HEADLESS=false`.

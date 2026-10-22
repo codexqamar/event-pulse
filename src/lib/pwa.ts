@@ -1,17 +1,14 @@
 export type PushSetupResult =
   | { status: "unsupported"; message: string }
   | { status: "denied"; message: string }
+  | { status: "misconfigured"; message: string }
   | { status: "ready"; message: string; subscription?: PushSubscription };
 
 const SERVICE_WORKER_URL = "/sw.js";
 const VAPID_PUBLIC_KEY = import.meta.env["VITE_VAPID_PUBLIC_KEY"] as string | undefined;
 
 export function canUsePwaFeatures() {
-  return (
-    typeof window !== "undefined" &&
-    "serviceWorker" in navigator &&
-    "Notification" in window
-  );
+  return typeof window !== "undefined" && "serviceWorker" in navigator && "Notification" in window;
 }
 
 export async function registerEventPulseServiceWorker() {
@@ -58,8 +55,8 @@ export async function setupPushNotifications(): Promise<PushSetupResult> {
 
   if (!VAPID_PUBLIC_KEY) {
     return {
-      status: "ready",
-      message: "Notifications are enabled. Add VITE_VAPID_PUBLIC_KEY to test push subscription.",
+      status: "misconfigured",
+      message: "Push is not configured. Add VITE_VAPID_PUBLIC_KEY and rebuild the app.",
     };
   }
 

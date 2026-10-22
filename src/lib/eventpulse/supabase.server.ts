@@ -13,6 +13,16 @@ import type {
   MonitorRunResult,
 } from "./types";
 import { DEFAULT_SETTINGS, buildDeepLink, getEmptyDashboardData } from "./seed";
+import {
+  buildScheduledTicketSnapshotMessage,
+  buildTicketAlertMessage,
+  extractTicketPageSnapshot,
+} from "./ticket-snapshot";
+import {
+  getMultiloginTokenHealth,
+  isApprovedMultiloginProfile,
+  readRenderedTicketPage,
+} from "./multilogin-browser.server";
 
 const SUPABASE_URL =
   process.env["SUPABASE_URL"] ??
@@ -24,6 +34,9 @@ const SUPABASE_SERVICE_ROLE_KEY =
   process.env["SUPABASE_SERVICE_KEY"] ??
   process.env["SERVICE_SUPABASESERVICE_KEY"] ??
   process.env["SERVICE_KEY"];
+const DELIVERY_TIMEOUT_MS = 10_000;
+const TOKEN_WARNING_REPEAT_MS = 24 * 60 * 60 * 1000;
+let lastTokenWarning: { key: string; sentAt: number } | null = null;
 
 type SupabaseRequestOptions = {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
@@ -149,7 +162,6 @@ type MonitorCheckResult = {
   responseMs: number;
   statusCode: number | null;
   error: string | null;
-  shouldAlert: boolean;
 };
 
 export async function loadDashboardData(): Promise<DashboardData> {
@@ -179,7 +191,8 @@ export async function loadDashboardData(): Promise<DashboardData> {
   const alerts = alertsResult.status === "fulfilled" ? alertsResult.value : [];
   const settingsRows = settingsResult.status === "fulfilled" ? settingsResult.value : [];
 
-  const mappedTargets = targets.map(mapTarget);
+  const settings = settingsRows[0] ? mapSettings(settingsRows[0]) : DEFAULT_SETTINGS;
+  const mappedTargets = targets.map((target) => mapTarget(target, settings.refreshSeconds));
   const mappedAlerts = alerts.map(mapAlert);
   const mappedProfiles = profiles.map(mapProfile);
 
@@ -191,7 +204,7 @@ export async function loadDashboardData(): Promise<DashboardData> {
     targets: mappedTargets,
     profiles: mappedProfiles,
     alerts: mappedAlerts,
-    settings: settingsRows[0] ? mapSettings(settingsRows[0]) : DEFAULT_SETTINGS,
+    settings,
     stats: {
       activeMonitors: mappedTargets.filter((target) => target.status !== "paused").length,
       alertsToday: mappedAlerts.length,
@@ -434,6 +447,7 @@ export async function saveProfileSession(input: SaveProfileSessionInput) {
 export async function savePushSubscription(input: SavePushSubscriptionInput) {
   await rest("eventpulse_push_subscriptions", {
     method: "POST",
+    query: { on_conflict: "endpoint" },
     prefer: "resolution=merge-duplicates",
     body: {
       endpoint: input.endpoint,
@@ -458,7 +472,7 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
     };
   }
 
-  const [targets, settingsRows, subscriptions] = await Promise.all([
+  const [targets, settingsRows, subscriptions, profiles] = await Promise.all([
     rest<TargetRow[]>("eventpulse_targets", {
       query: {
         select: "*",
@@ -473,10 +487,14 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
     rest<PushSubscriptionRow[]>("eventpulse_push_subscriptions", {
       query: { select: "endpoint,subscription" },
     }),
+    rest<ProfileRow[]>("eventpulse_profiles", {
+      query: { select: "*" },
+    }),
   ]);
 
   const settings = settingsRows[0] ? mapSettings(settingsRows[0]) : DEFAULT_SETTINGS;
-  const dueTargets = targets.filter(isTargetDue);
+  const profilesByName = new Map(profiles.map((profile) => [profile.profile_name, profile]));
+  const dueTargets = targets.filter((target) => isTargetDue(target, settings.refreshSeconds));
   const result: MonitorRunResult = {
     checked: 0,
     alertsCreated: 0,
@@ -488,19 +506,22 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
     errors: [],
   };
 
+  try {
+    await notifyMultiloginTokenExpiry(settings, subscriptions, result);
+  } catch (error) {
+    result.errors.push(`MultiLogin token warning failed: ${formatUnknownError(error)}`);
+  }
+
   for (const row of dueTargets) {
     result.checked += 1;
-    const target = mapTarget(row);
-    const check = await checkTarget(target);
+    const target = mapTarget(row, settings.refreshSeconds);
+    const check = await checkTarget(target, settings, profilesByName.get(target.profile));
     const now = new Date().toISOString();
-    const nextStatus =
-      check.status === "available" && row.status === "available" ? "monitoring" : check.status;
-
     await rest("eventpulse_targets", {
       method: "PATCH",
       query: { id: `eq.${row.id}` },
       body: {
-        status: nextStatus,
+        status: check.status,
         availability: check.availability,
         last_checked_at: now,
         last_response_ms: check.responseMs,
@@ -510,15 +531,30 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
       },
     });
 
-    if (!check.shouldAlert || row.status === "available") continue;
+    const firstObservation = !row.last_checked_at;
+    const snapshotChanged = check.availability !== row.availability || check.status !== row.status;
+    if (!hasEnabledDeliveryChannel(settings)) continue;
 
-    const alertMessage = `${target.event}: ${check.availability}`;
+    const alertMessage =
+      firstObservation || snapshotChanged
+        ? buildTicketAlertMessage(
+            target.event,
+            row.availability,
+            check.availability,
+            firstObservation,
+          )
+        : buildScheduledTicketSnapshotMessage(target.event, check.availability, now);
     const [alert] = await rest<AlertRow[]>("eventpulse_alerts", {
       method: "POST",
       prefer: "return=representation",
       body: {
         target_id: row.id,
-        tone: check.status === "available" ? "online" : "warn",
+        tone:
+          check.status === "available"
+            ? "online"
+            : check.status === "captcha" || check.status === "limited"
+              ? "warn"
+              : "info",
         message: alertMessage,
         deep_link: target.deepLink,
       },
@@ -544,7 +580,10 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
   return result;
 }
 
-function mapTarget(row: TargetRow): BackendMonitorTarget {
+function mapTarget(
+  row: TargetRow,
+  refreshSeconds = Number(row.refresh_seconds),
+): BackendMonitorTarget {
   return {
     id: row.id,
     platform: row.platform as BackendMonitorTarget["platform"],
@@ -553,7 +592,7 @@ function mapTarget(row: TargetRow): BackendMonitorTarget {
     status: row.status,
     availability: row.availability,
     url: row.target_url,
-    refresh: Number(row.refresh_seconds),
+    refresh: refreshSeconds,
     profile: row.profile_name,
     proxy: row.proxy_label,
     deepLink:
@@ -703,13 +742,91 @@ function formatMultiloginError(status: number, body: string) {
   return `MultiLogin launch failed (${status}): ${clean || "No response body."}`;
 }
 
-function isTargetDue(row: TargetRow) {
+function isTargetDue(row: TargetRow, refreshSeconds: number) {
   const now = Date.now();
   if (row.monitor_starts_at && now < new Date(row.monitor_starts_at).getTime()) return false;
   if (row.monitor_ends_at && now > new Date(row.monitor_ends_at).getTime()) return false;
   if (!row.last_checked_at) return true;
   const ageMs = now - new Date(row.last_checked_at).getTime();
-  return ageMs >= Number(row.refresh_seconds) * 1000;
+  return ageMs >= refreshSeconds * 1000;
+}
+
+function hasEnabledDeliveryChannel(settings: BackendSettings) {
+  return (
+    settings.pushAlerts ||
+    settings.smsAlerts ||
+    settings.whatsappAlerts ||
+    settings.telegramAlerts ||
+    settings.discordAlerts
+  );
+}
+
+async function notifyMultiloginTokenExpiry(
+  settings: BackendSettings,
+  subscriptions: PushSubscriptionRow[],
+  result: MonitorRunResult,
+) {
+  if (!hasEnabledDeliveryChannel(settings)) return;
+
+  const token = getMultiloginTokenHealth();
+  if ((token.status !== "expiring" && token.status !== "expired") || !token.expiresAt) return;
+
+  const warningKey = `multilogin-token:${token.expiresAt}`;
+  if (
+    lastTokenWarning?.key === warningKey &&
+    Date.now() - lastTokenWarning.sentAt < TOKEN_WARNING_REPEAT_MS
+  ) {
+    return;
+  }
+
+  const recentWarnings = await rest<Pick<AlertRow, "message">[]>("eventpulse_alerts", {
+    query: {
+      select: "message",
+      target_id: "is.null",
+      created_at: `gte.${new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()}`,
+      order: "created_at.desc",
+      limit: "30",
+    },
+  });
+  if (recentWarnings.some((alert) => alert.message.includes(`Expires: ${token.expiresAt}`))) {
+    lastTokenWarning = { key: warningKey, sentAt: Date.now() };
+    return;
+  }
+
+  const alertMessage = [
+    token.status === "expired"
+      ? "MultiLogin API token has expired. Ticket checks cannot use browser profiles."
+      : "MultiLogin API token is nearing expiry.",
+    `Expires: ${token.expiresAt}`,
+    "Generate a replacement automation token and update MULTILOGIN_API_TOKEN.",
+  ].join("\n");
+  const [alert] = await rest<AlertRow[]>("eventpulse_alerts", {
+    method: "POST",
+    prefer: "return=representation",
+    body: {
+      target_id: null,
+      tone: "warn",
+      message: alertMessage,
+      deep_link: null,
+    },
+  });
+  result.alertsCreated += 1;
+
+  const delivery = await deliverAlert({
+    ...(alert?.id ? { alertId: alert.id } : {}),
+    title: "HD-1 Drop Monitor configuration alert",
+    body: alertMessage,
+    url: process.env["EVENTPULSE_PUBLIC_URL"] ?? "/",
+    settings,
+    subscriptions,
+  });
+  result.pushSent += delivery.pushSent;
+  result.smsSent += delivery.smsSent;
+  result.whatsappSent += delivery.whatsappSent;
+  result.telegramSent += delivery.telegramSent;
+  result.discordSent += delivery.discordSent;
+  result.errors.push(...delivery.errors);
+  lastTokenWarning = { key: warningKey, sentAt: Date.now() };
 }
 
 function formatWatchSummary(input: NewTargetInput) {
@@ -719,89 +836,54 @@ function formatWatchSummary(input: NewTargetInput) {
   return `Watching ${quantity} ${input.normalTicketsOnly ? "standard" : "any"} tickets`;
 }
 
-async function checkTarget(target: BackendMonitorTarget): Promise<MonitorCheckResult> {
+async function checkTarget(
+  target: BackendMonitorTarget,
+  settings: BackendSettings,
+  profile: ProfileRow | undefined,
+): Promise<MonitorCheckResult> {
   const started = Date.now();
   try {
-    const response = await fetch(target.url, {
-      redirect: "follow",
-      signal: AbortSignal.timeout(15000),
-      headers: {
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "en-GB,en;q=0.9",
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-      },
+    if (!isApprovedMultiloginProfile(target.profile)) {
+      throw new Error(
+        `Target is not assigned to an approved Multilogin profile: ${target.profile}`,
+      );
+    }
+    if (!profile?.multilogin_profile_id || !profile.multilogin_folder_id) {
+      throw new Error(`Approved Multilogin profile mapping is incomplete: ${target.profile}`);
+    }
+
+    const response = await readRenderedTicketPage({
+      endpoint: process.env["MULTILOGIN_LAUNCHER_ENDPOINT"] ?? settings.multiloginEndpoint,
+      folderId: profile.multilogin_folder_id,
+      profileId: profile.multilogin_profile_id,
+      profileName: profile.profile_name,
+      url: target.url,
     });
-    const text = await response.text();
-    const lower = text.toLowerCase();
     const responseMs = Date.now() - started;
-
-    if (response.status === 429 || response.status === 403) {
-      return {
-        status: "limited",
-        availability: `Blocked or rate limited (${response.status})`,
-        responseMs,
-        statusCode: response.status,
-        error: null,
-        shouldAlert: false,
-      };
-    }
-
-    if (lower.includes("captcha") || lower.includes("verify you are human")) {
-      return {
-        status: "captcha",
-        availability: "Captcha challenge detected",
-        responseMs,
-        statusCode: response.status,
-        error: null,
-        shouldAlert: false,
-      };
-    }
-
-    const sectionHit =
-      target.filters.sectionFilters.length === 0 ||
-      target.filters.sectionFilters.some((section) => lower.includes(section.toLowerCase()));
-    const positiveHit = [
-      "tickets available",
-      "buy tickets",
-      "resale ticket",
-      "select seats",
-      "available now",
-    ].some((needle) => lower.includes(needle));
-    const negativeHit = [
-      "sold out",
-      "no tickets available",
-      "currently unavailable",
-      "not currently available",
-    ].some((needle) => lower.includes(needle));
-
-    if (response.ok && sectionHit && positiveHit && !negativeHit) {
-      return {
-        status: "available",
-        availability: `${target.filters.minTickets}+ tickets matched filters`,
-        responseMs,
-        statusCode: response.status,
-        error: null,
-        shouldAlert: true,
-      };
-    }
+    const snapshot = extractTicketPageSnapshot({
+      html: response.html,
+      statusCode: response.statusCode,
+      responseOk: response.responseOk,
+      sectionFilters: target.filters.sectionFilters,
+      maxPrice: target.filters.maxPrice,
+      normalTicketsOnly: target.filters.normalTicketsOnly,
+    });
 
     return {
-      status: "monitoring",
-      availability: "No matching inventory detected",
+      status: snapshot.status,
+      availability: snapshot.summary,
       responseMs,
-      statusCode: response.status,
+      statusCode: response.statusCode,
       error: null,
-      shouldAlert: false,
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown monitor error";
     return {
       status: "limited",
-      availability: "Target check failed",
+      availability: `Target check failed: ${message}`.slice(0, 1200),
       responseMs: Date.now() - started,
       statusCode: null,
-      error: error instanceof Error ? error.message : "Unknown monitor error",
-      shouldAlert: false,
+      error: message,
     };
   }
 }
@@ -823,33 +905,49 @@ async function deliverAlert(input: {
     errors: [] as string[],
   };
 
-  if (input.settings.pushAlerts && input.subscriptions.length > 0) {
-    result.pushSent = await sendWebPush(
-      input.title,
-      input.body,
-      input.url,
-      input.subscriptions,
-      result.errors,
-    );
-  }
-  if (input.settings.smsAlerts) {
-    result.smsSent = await sendTwilioMessage("sms", input.body, result.errors);
-  }
-  if (input.settings.whatsappAlerts) {
-    result.whatsappSent = await sendTwilioMessage("whatsapp", input.body, result.errors);
-  }
-  if (input.settings.telegramAlerts) {
-    result.telegramSent = await sendTelegramMessage(input.body, input.url, result.errors);
-  }
-  if (input.settings.discordAlerts) {
-    result.discordSent = await sendDiscordMessage(input.body, input.url, result.errors);
-  }
+  [result.pushSent, result.smsSent, result.whatsappSent, result.telegramSent, result.discordSent] =
+    await Promise.all([
+      input.settings.pushAlerts && input.subscriptions.length > 0
+        ? deliverChannel("Web push", result.errors, () =>
+            sendWebPush(input.title, input.body, input.url, input.subscriptions, result.errors),
+          )
+        : 0,
+      input.settings.smsAlerts
+        ? deliverChannel("Twilio SMS", result.errors, () =>
+            sendTwilioMessage("sms", input.body, result.errors),
+          )
+        : 0,
+      input.settings.whatsappAlerts
+        ? deliverChannel("Twilio WhatsApp", result.errors, () =>
+            sendTwilioMessage("whatsapp", input.body, result.errors),
+          )
+        : 0,
+      input.settings.telegramAlerts
+        ? deliverChannel("Telegram", result.errors, () =>
+            sendTelegramMessage(input.body, input.url, result.errors),
+          )
+        : 0,
+      input.settings.discordAlerts
+        ? deliverChannel("Discord", result.errors, () =>
+            sendDiscordMessage(input.body, input.url, result.errors),
+          )
+        : 0,
+    ]);
 
   if (input.alertId) {
     await markAlertDelivered(input.alertId, result);
   }
 
   return result;
+}
+
+async function deliverChannel(name: string, errors: string[], send: () => Promise<number>) {
+  try {
+    return await send();
+  } catch (error) {
+    errors.push(`${name} failed: ${formatUnknownError(error)}`);
+    return 0;
+  }
 }
 
 async function sendWebPush(
@@ -879,6 +977,7 @@ async function sendWebPush(
       await webpush.default.sendNotification(
         subscription.subscription as never,
         JSON.stringify({ title, body, url }),
+        { timeout: DELIVERY_TIMEOUT_MS, TTL: 60 },
       );
       sent += 1;
     } catch (error) {
@@ -902,7 +1001,7 @@ async function sendTwilioMessage(kind: "sms" | "whatsapp", body: string, errors:
 
   let sent = 0;
   for (const to of recipients) {
-    const response = await fetch(
+    const response = await fetchDelivery(
       `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
       {
         method: "POST",
@@ -940,7 +1039,7 @@ async function sendTelegramMessage(body: string, url: string, errors: string[]) 
 
   let sent = 0;
   for (const chatId of chatIds) {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    const response = await fetchDelivery(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -968,7 +1067,7 @@ async function sendDiscordMessage(body: string, url: string, errors: string[]) {
 
   let sent = 0;
   for (const webhookUrl of webhookUrls) {
-    const response = await fetch(webhookUrl, {
+    const response = await fetchDelivery(webhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -984,6 +1083,25 @@ async function sendDiscordMessage(body: string, url: string, errors: string[]) {
     }
   }
   return sent;
+}
+
+async function fetchDelivery(url: string, init: RequestInit) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        ...init,
+        signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+      });
+      if (response.status !== 429 && response.status < 500) return response;
+      if (attempt === 1) return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 1) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw lastError instanceof Error ? lastError : new Error("Delivery failed.");
 }
 
 async function markAlertDelivered(

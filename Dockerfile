@@ -9,6 +9,8 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NITRO_PRESET=node-server
+ARG VITE_VAPID_PUBLIC_KEY
+ENV VITE_VAPID_PUBLIC_KEY=$VITE_VAPID_PUBLIC_KEY
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -25,4 +27,7 @@ COPY --from=builder /app/.output ./.output
 
 EXPOSE 3000
 
-CMD ["node", ".output/server/index.mjs"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:3000/api/eventpulse/health || exit 1
+
+CMD ["sh", "-c", "node .output/server/index.mjs & pid=$!; trap 'kill -TERM $pid' TERM INT; until wget -q -O /dev/null http://127.0.0.1:3000/api/eventpulse/health; do kill -0 $pid || exit 1; sleep 1; done; wait $pid"]
