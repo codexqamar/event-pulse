@@ -3,7 +3,11 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { getMultiloginTokenHealth } from "./lib/eventpulse/multilogin-browser.server";
-import { runMonitorPass } from "./lib/eventpulse/supabase.server";
+import {
+  notifyMonitorFailure,
+  notifyMonitorRecovered,
+  runMonitorPass,
+} from "./lib/eventpulse/supabase.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -44,8 +48,14 @@ async function runScheduledMonitorPass() {
     if (result.checked > 0 || result.errors.length > 0) {
       console.info("HD-1 monitor pass", result);
     }
+    await notifyMonitorRecovered().catch((notifyError: unknown) =>
+      console.error("HD-1 monitor recovery alert failed", notifyError),
+    );
   } catch (error) {
     console.error("HD-1 scheduled monitor pass failed", error);
+    await notifyMonitorFailure(error).catch((notifyError: unknown) =>
+      console.error("HD-1 monitor failure alert failed", notifyError),
+    );
   } finally {
     scheduledMonitorRunning = false;
   }
@@ -124,6 +134,17 @@ async function handleMonitorRun(request: Request) {
     );
   }
 
-  const result = await runMonitorPass();
-  return Response.json(result);
+  try {
+    const result = await runMonitorPass();
+    await notifyMonitorRecovered().catch((notifyError: unknown) =>
+      console.error("HD-1 monitor recovery alert failed", notifyError),
+    );
+    return Response.json(result);
+  } catch (error) {
+    console.error("HD-1 monitor-run pass failed", error);
+    await notifyMonitorFailure(error).catch((notifyError: unknown) =>
+      console.error("HD-1 monitor failure alert failed", notifyError),
+    );
+    return Response.json({ error: "Monitor pass failed." }, { status: 500 });
+  }
 }

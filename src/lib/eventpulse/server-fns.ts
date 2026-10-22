@@ -9,6 +9,7 @@ import {
   saveProfileSession,
   savePushSubscription,
   saveSettings,
+  sendTestAlert,
   setTargetStatus,
   upsertProfile,
 } from "./supabase.server";
@@ -141,3 +142,7 @@ export const savePushSubscriptionFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     return await savePushSubscription(data);
   });
+
+export const sendTestAlertFn = createServerFn({ method: "POST" }).handler(async () => {
+  return await sendTestAlert();
+});

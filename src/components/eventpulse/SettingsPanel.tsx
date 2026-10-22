@@ -5,10 +5,14 @@ import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
-import { BellRing, Send } from "lucide-react";
+import { BellRing, Megaphone, Send } from "lucide-react";
 import { showTestNotification, setupPushNotifications } from "@/lib/pwa";
 import type { BackendSettings } from "@/lib/eventpulse/types";
-import { savePushSubscriptionFn, saveSettingsFn } from "@/lib/eventpulse/server-fns";
+import {
+  savePushSubscriptionFn,
+  saveSettingsFn,
+  sendTestAlertFn,
+} from "@/lib/eventpulse/server-fns";
 
 export function SettingsPanel({ settings }: { settings: BackendSettings }) {
   const [interval, setInterval] = useState([settings.refreshSeconds]);
@@ -24,6 +28,7 @@ export function SettingsPanel({ settings }: { settings: BackendSettings }) {
   const [settingsStatus, setSettingsStatus] = useState("");
   const saveSettings = useServerFn(saveSettingsFn);
   const savePushSubscription = useServerFn(savePushSubscriptionFn);
+  const sendTestAlert = useServerFn(sendTestAlertFn);
   const router = useRouter();
 
   async function runPushAction(action: "setup" | "test") {
@@ -44,6 +49,30 @@ export function SettingsPanel({ settings }: { settings: BackendSettings }) {
       setPush(result.status === "ready");
     } catch (error) {
       setPushStatus(error instanceof Error ? error.message : "Push setup failed.");
+    } finally {
+      setIsPushBusy(false);
+    }
+  }
+
+  async function runChannelTest() {
+    setIsPushBusy(true);
+    setPushStatus("Sending test alert to every enabled channel...");
+    try {
+      const result = await sendTestAlert();
+      const sent = [
+        `push ${result.pushSent}`,
+        `Telegram ${result.telegramSent}`,
+        `Discord ${result.discordSent}`,
+        `SMS ${result.smsSent}`,
+        `WhatsApp ${result.whatsappSent}`,
+      ].join(", ");
+      setPushStatus(
+        result.errors.length
+          ? `Delivered: ${sent}. Issues: ${result.errors.join(" | ")}`
+          : `Delivered: ${sent}.`,
+      );
+    } catch (error) {
+      setPushStatus(error instanceof Error ? error.message : "Channel test failed.");
     } finally {
       setIsPushBusy(false);
     }
@@ -146,6 +175,16 @@ export function SettingsPanel({ settings }: { settings: BackendSettings }) {
           >
             <Send className="h-3.5 w-3.5" />
             Test Notification
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={isPushBusy}
+            onClick={() => void runChannelTest()}
+          >
+            <Megaphone className="h-3.5 w-3.5" />
+            Test All Channels
           </Button>
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">{pushStatus}</p>
