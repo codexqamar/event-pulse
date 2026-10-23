@@ -572,6 +572,21 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
       result.checked += 1;
       const target = mapTarget(row, settings.refreshSeconds);
       const check = await checkTarget(target, settings, profilesByName.get(target.profile));
+
+      // After every (re)deploy the launcher downloads its browser engine before the first profile
+      // can start. That is start-up, not a failed check: keep the target's last snapshot, skip
+      // the per-target alert, and announce the warm-up once.
+      if (check.error && /downloading of core/i.test(check.error)) {
+        result.checked -= 1;
+        if (!launcherWarmUpAnnounced && hasEnabledDeliveryChannel(settings)) {
+          launcherWarmUpAnnounced = true;
+          deliveries.push(announceLauncherWarmUp(dueTargets.length, settings, subscriptions));
+          result.alertsCreated += 1;
+        }
+        continue;
+      }
+      launcherWarmUpAnnounced = false;
+
       const now = new Date().toISOString();
       const pause =
         check.statusCode === 403 || check.statusCode === 429
@@ -666,6 +681,34 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
   }
 
   return result;
+}
+
+// True while the launcher is still preparing its browser engine and the start-up alert went out.
+let launcherWarmUpAnnounced = false;
+
+async function announceLauncherWarmUp(
+  targetCount: number,
+  settings: BackendSettings,
+  subscriptions: PushSubscriptionRow[],
+): Promise<DeliveryResult> {
+  const body = [
+    "Ticket monitoring restarted",
+    `Preparing the monitoring browser; checks for ${targetCount} target${targetCount === 1 ? "" : "s"} resume automatically in about a minute.`,
+    `Started: ${new Date().toISOString()}`,
+  ].join("\n");
+  const [alert] = await rest<AlertRow[]>("eventpulse_alerts", {
+    method: "POST",
+    prefer: "return=representation",
+    body: { target_id: null, tone: "info", message: body, deep_link: null },
+  });
+  return await deliverAlert({
+    ...(alert?.id ? { alertId: alert.id } : {}),
+    title: "🔄 HD-1: monitor starting up",
+    body,
+    url: process.env["EVENTPULSE_PUBLIC_URL"] ?? "",
+    settings,
+    subscriptions,
+  });
 }
 
 const MONITOR_FAILURE_REPEAT_MS = 15 * 60 * 1000;
