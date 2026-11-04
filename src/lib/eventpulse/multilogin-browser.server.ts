@@ -30,6 +30,7 @@ type LauncherState = {
 
 type LauncherResponse = {
   data?: {
+    id?: string;
     port?: number | string;
     states?: Record<string, LauncherState>;
   };
@@ -43,6 +44,14 @@ type ProxyCredentials = {
   username: string;
 };
 
+type ScraperProxy = {
+  host: string;
+  password?: string;
+  port: number;
+  type: "http" | "socks5";
+  username?: string;
+};
+
 export type MultiloginTokenHealth = {
   automation: boolean | null;
   expiresAt: string | null;
@@ -52,6 +61,10 @@ export type MultiloginTokenHealth = {
 
 export function isApprovedMultiloginProfile(profileName: string) {
   return APPROVED_PROFILE_NAMES.has(profileName);
+}
+
+export function hasConfiguredScraperProxyPool() {
+  return parseScraperProxyPool(process.env["MULTILOGIN_SCRAPER_PROXIES"]).length > 0;
 }
 
 export function getMultiloginTokenHealth(now = Date.now()): MultiloginTokenHealth {
@@ -103,7 +116,25 @@ export async function readRenderedTicketPage(input: RenderedPageInput) {
   const token = process.env["MULTILOGIN_API_TOKEN"];
   if (!token) throw new Error("MULTILOGIN_API_TOKEN is missing.");
 
+  const scraperProxy = nextScraperProxy();
+  if (scraperProxy) {
+    return readWithQuickProfile(input, token, scraperProxy);
+  }
+
   const port = await ensureProfileRunning(input, token);
+  return readPageFromPort(port, input.url, await proxyCredentialsFor(input.profileId, token));
+}
+
+async function readWithQuickProfile(input: RenderedPageInput, token: string, proxy: ScraperProxy) {
+  const quickProfile = await startQuickProfile(input.endpoint, token, proxy);
+  try {
+    return await readPageFromPort(quickProfile.port, input.url);
+  } finally {
+    await stopProfile(input.endpoint, token, quickProfile.id);
+  }
+}
+
+async function readPageFromPort(port: number, url: string, credentials?: ProxyCredentials) {
   const cdpHost = await resolveCdpHost();
   const browser = await puppeteer.connect({
     browserURL: `http://${formatHost(cdpHost)}:${port}`,
@@ -112,7 +143,7 @@ export async function readRenderedTicketPage(input: RenderedPageInput) {
 
   const page = await browser.newPage();
   try {
-    await page.authenticate(await proxyCredentialsFor(input.profileId, token));
+    if (credentials) await page.authenticate(credentials);
     page.setDefaultNavigationTimeout(MULTILOGIN_TIMEOUT_MS);
     let latestNavigationStatus: number | null = null;
     page.on("response", (response) => {
@@ -121,11 +152,11 @@ export async function readRenderedTicketPage(input: RenderedPageInput) {
       }
     });
 
-    const response = await page.goto(input.url, {
+    const response = await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: MULTILOGIN_TIMEOUT_MS,
     });
-    if (response?.status() === 401 && isTicketmasterUrl(input.url)) {
+    if (response?.status() === 401 && isTicketmasterUrl(url)) {
       await waitForTicketmasterIdentification(page);
     }
     await page.waitForNetworkIdle({ idleTime: 1_000, timeout: 8_000 }).catch(() => undefined);
@@ -139,6 +170,119 @@ export async function readRenderedTicketPage(input: RenderedPageInput) {
   } finally {
     await page.close({ runBeforeUnload: false }).catch(() => undefined);
     browser.disconnect();
+  }
+}
+
+let scraperProxyCursor = 0;
+
+function nextScraperProxy() {
+  const proxies = parseScraperProxyPool(process.env["MULTILOGIN_SCRAPER_PROXIES"]);
+  if (proxies.length === 0) return null;
+  const proxy = proxies[scraperProxyCursor % proxies.length]!;
+  scraperProxyCursor = (scraperProxyCursor + 1) % proxies.length;
+  return proxy;
+}
+
+function parseScraperProxyPool(raw: string | undefined): ScraperProxy[] {
+  if (!raw?.trim()) return [];
+
+  let values: unknown;
+  try {
+    values = JSON.parse(raw);
+  } catch {
+    throw new Error("MULTILOGIN_SCRAPER_PROXIES must be a JSON array of proxy URLs.");
+  }
+  if (!Array.isArray(values)) {
+    throw new Error("MULTILOGIN_SCRAPER_PROXIES must be a JSON array of proxy URLs.");
+  }
+  if (values.length > 100) {
+    throw new Error("MULTILOGIN_SCRAPER_PROXIES supports up to 100 proxy URLs.");
+  }
+
+  return values.map((value, index) => parseScraperProxy(value, index));
+}
+
+function parseScraperProxy(value: unknown, index: number): ScraperProxy {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Scraper proxy #${index + 1} must be a non-empty URL.`);
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value.includes("://") ? value : `http://${value}`);
+  } catch {
+    throw new Error(`Scraper proxy #${index + 1} is invalid.`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "socks5:") {
+    throw new Error(`Scraper proxy #${index + 1} must use http:// or socks5://.`);
+  }
+  const port = Number(url.port);
+  if (!url.hostname || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`Scraper proxy #${index + 1} must include a valid host and port.`);
+  }
+
+  return {
+    host: url.hostname,
+    port,
+    type: url.protocol === "socks5:" ? "socks5" : "http",
+    ...(url.username ? { username: decodeURIComponent(url.username) } : {}),
+    ...(url.password ? { password: decodeURIComponent(url.password) } : {}),
+  };
+}
+
+async function startQuickProfile(endpoint: string, token: string, proxy: ScraperProxy) {
+  const response = await fetch(new URL("/api/v3/profile/quick", normalizeEndpoint(endpoint)), {
+    method: "POST",
+    headers: { ...launcherHeaders(token), "content-type": "application/json" },
+    body: JSON.stringify({
+      browser_type: "mimic",
+      os_type: "linux",
+      automation: "puppeteer",
+      is_headless: process.env["MULTILOGIN_HEADLESS"] === "true",
+      parameters: {
+        flags: {
+          navigator_masking: "mask",
+          audio_masking: "mask",
+          localization_masking: "mask",
+          geolocation_popup: "prompt",
+          geolocation_masking: "mask",
+          timezone_masking: "mask",
+          canvas_noise: "natural",
+          graphics_noise: "natural",
+          graphics_masking: "mask",
+          webrtc_masking: "natural",
+          fonts_masking: "mask",
+          media_devices_masking: "mask",
+          screen_masking: "mask",
+          proxy_masking: "custom",
+          ports_masking: "mask",
+        },
+        proxy,
+        fingerprint: {},
+      },
+    }),
+    signal: AbortSignal.timeout(MULTILOGIN_TIMEOUT_MS),
+  });
+  const body = (await response.json()) as LauncherResponse;
+  const port = parsePort(body.data?.port);
+  const id = body.data?.id;
+  if (response.ok && port && id) return { id, port };
+
+  throw new Error(
+    `Multilogin quick profile failed (${response.status}): ${body.status?.message || "No response message."}`,
+  );
+}
+
+async function stopProfile(endpoint: string, token: string, profileId: string) {
+  const response = await fetch(
+    new URL(`/api/v1/profile/stop/p/${encodeURIComponent(profileId)}`, normalizeEndpoint(endpoint)),
+    {
+      headers: launcherHeaders(token),
+      signal: AbortSignal.timeout(MULTILOGIN_TIMEOUT_MS),
+    },
+  ).catch(() => null);
+  if (response && !response.ok && response.status !== 500) {
+    console.error(`Multilogin quick profile stop failed (${response.status}).`);
   }
 }
 

@@ -20,6 +20,7 @@ import {
 } from "./ticket-snapshot";
 import {
   getMultiloginTokenHealth,
+  hasConfiguredScraperProxyPool,
   isApprovedMultiloginProfile,
   readRenderedTicketPage,
 } from "./multilogin-browser.server";
@@ -171,6 +172,7 @@ type MonitorCheckResult = {
   responseMs: number;
   statusCode: number | null;
   error: string | null;
+  usesRotatingProxy: boolean;
 };
 
 export async function loadDashboardData(): Promise<DashboardData> {
@@ -589,10 +591,14 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
 
       const now = new Date().toISOString();
       const pause =
-        check.statusCode === 403 || check.statusCode === 429
+        !check.usesRotatingProxy && (check.statusCode === 403 || check.statusCode === 429)
           ? recordProfileBlock(target.profile, check.statusCode)
           : null;
-      const recovered = !pause && check.error == null && recordProfileSuccess(target.profile);
+      const recovered =
+        !check.usesRotatingProxy &&
+        !pause &&
+        check.error == null &&
+        recordProfileSuccess(target.profile);
       await rest("eventpulse_targets", {
         method: "PATCH",
         query: { id: `eq.${row.id}` },
@@ -611,6 +617,9 @@ export async function runMonitorPass(): Promise<MonitorRunResult> {
       const snapshotChanged =
         check.availability !== row.availability || check.status !== row.status;
       if (!hasEnabledDeliveryChannel(settings)) continue;
+
+      // Keep captcha state visible in dashboard, but never create or deliver captcha alerts.
+      if (check.status === "captcha") continue;
 
       const snapshotMessage =
         firstObservation || snapshotChanged
@@ -1073,7 +1082,9 @@ async function checkTarget(
   profile: ProfileRow | undefined,
 ): Promise<MonitorCheckResult> {
   const started = Date.now();
+  let usesRotatingProxy = false;
   try {
+    usesRotatingProxy = hasConfiguredScraperProxyPool();
     if (!isApprovedMultiloginProfile(target.profile)) {
       throw new Error(
         `Target is not assigned to an approved Multilogin profile: ${target.profile}`,
@@ -1106,6 +1117,7 @@ async function checkTarget(
       responseMs,
       statusCode: response.statusCode,
       error: null,
+      usesRotatingProxy,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown monitor error";
@@ -1115,6 +1127,7 @@ async function checkTarget(
       responseMs: Date.now() - started,
       statusCode: null,
       error: message,
+      usesRotatingProxy,
     };
   }
 }
