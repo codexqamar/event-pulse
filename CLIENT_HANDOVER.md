@@ -1,15 +1,8 @@
 # HD-1 Drop Monitor Handover
 
-## Project access
+## Application access
 
 - Production application: https://event-pulse.web-testlink.com/
-- Lovable editor: https://lovable.dev/projects/b953ae68-395b-4028-bf8d-5ecda34f136d
-- GitHub source: https://github.com/codexqamar/event-pulse
-- Production branch: `main`
-
-The Lovable project and GitHub repository stay synchronized through the `main` branch. Do not force
-push, rebase, amend, or squash commits that have already been pushed because that can remove Lovable
-project history.
 
 ## Current monitoring behavior
 
@@ -27,7 +20,10 @@ project history.
 Add `MULTILOGIN_SCRAPER_PROXIES` in Coolify as a JSON array. Example format:
 
 ```text
-["http://username:password@proxy-one.example:8000","socks5://username:password@proxy-two.example:1080"]
+[
+  "http://username:password@proxy-one.example:8000",
+  "socks5://username:password@proxy-two.example:1080"
+]
 ```
 
 Use working residential or mobile scraping proxies supplied by the client or proxy provider. Keep
@@ -39,7 +35,7 @@ approved-profile monitoring.
 
 Production needs these services and secrets:
 
-- Application container built from this repository.
+- Deployed HD-1 Drop Monitor application container.
 - Multilogin launcher container on the same private network.
 - Supabase URL and service-role key.
 - Scheduler enabled on exactly one application replica.
@@ -50,8 +46,8 @@ Production needs these services and secrets:
 - Optional Twilio settings for SMS and WhatsApp.
 - Optional rotating scraper proxy pool.
 
-Use `.env.example` as the complete variable checklist. Real credentials must remain in Coolify or
-another secret manager and must not be added to Git or the source ZIP.
+Real credentials must remain in Coolify or another secret manager and must not be included in this
+handover document or shared through unsecured messages.
 
 ## Acceptance test
 
@@ -67,6 +63,6 @@ another secret manager and must not be added to Git or the source ZIP.
 ## Credential handover
 
 Account owners should provide or transfer access directly through each provider rather than placing
-passwords in this document. Required ownership includes GitHub, Lovable, Coolify, Supabase,
-Multilogin, Telegram, Discord, domain/DNS, and Twilio if used. Rotate any credential previously sent
-through chat after handover.
+passwords in this document. Required ownership includes Coolify, Supabase, Multilogin, Telegram,
+Discord, domain/DNS, and Twilio if used. Rotate any credential previously sent through chat after
+handover.
