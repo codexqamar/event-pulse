@@ -126,6 +126,25 @@ and combines alerts that arrive while it waits into one message instead of dropp
 **Test All Channels** in Global Controls & Settings to send one test alert through every enabled
 channel and see per-channel results.
 
+Captcha challenge pages remain visible as a target status but do not create alert-log entries or
+send push, Telegram, Discord, SMS, or WhatsApp messages. This prevents challenge pages from
+repeating a notification on every interval.
+
+## Rotating scraper proxies
+
+Set `MULTILOGIN_SCRAPER_PROXIES` to a JSON array of server-side proxy URLs to use a different
+temporary Multilogin quick profile for each target check:
+
+```sh
+MULTILOGIN_SCRAPER_PROXIES=["http://user:password@host1:8000","socks5://user:password@host2:1080"]
+```
+
+URLs may use `http://` or `socks5://`. The pool rotates sequentially and wraps to the first proxy
+after the last. Each quick profile is stopped and deleted after its check. Existing approved
+Multilogin profiles, cookies, and sticky proxy assignments are not edited. Leave the value as `[]`
+to keep using the assigned regular profiles. Store this value only in the deployment secret manager;
+never commit real proxy credentials.
+
 `/api/eventpulse/health` reports token state without exposing the credential. Finite tokens trigger
 one warning per 24 hours through enabled notification channels after entering the configured warning
 window. Multilogin may include a provider-managed technical JWT expiry even when `no_exp` is
